@@ -1,0 +1,311 @@
+name: Monorepo CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      skip_hygiene:
+        description: 'repo-hygiene 건너뛰기'
+        type: boolean
+        default: false
+      skip_java:
+        description: 'java-build 건너뛰기'
+        type: boolean
+        default: false
+      skip_mcp:
+        description: 'mcp-smoke-test 건너뛰기'
+        type: boolean
+        default: false
+      skip_web:
+        description: 'web-validate 건너뛰기'
+        type: boolean
+        default: false
+      skip_codeql:
+        description: 'codeql 건너뛰기'
+        type: boolean
+        default: false
+      skip_docs:
+        description: 'docs-check 건너뛰기'
+        type: boolean
+        default: false
+      skip_release:
+        description: 'release 건너뛰기'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  security-events: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: '17'
+
+jobs:
+  # 0) 변경 감지 + 존재 프로젝트 수집 + skip 플래그 정규화
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      mcp: ${{ steps.filter.outputs.mcp }}
+      java_projects: ${{ steps.collect.outputs.java_projects }}
+      web_projects: ${{ steps.collect.outputs.web_projects }}
+      skip_hygiene: ${{ steps.flags.outputs.skip_hygiene }}
+      skip_java: ${{ steps.flags.outputs.skip_java }}
+      skip_mcp: ${{ steps.flags.outputs.skip_mcp }}
+      skip_web: ${{ steps.flags.outputs.skip_web }}
+      skip_codeql: ${{ steps.flags.outputs.skip_codeql }}
+      skip_docs: ${{ steps.flags.outputs.skip_docs }}
+      skip_release: ${{ steps.flags.outputs.skip_release }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Path filter
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            mcp:
+              - 'mcp-system-monitor-server/**'
+      - name: Collect existing project folders
+        id: collect
+        run: |
+          jp='[]'; wp='[]'
+          for d in mcp-system-monitor-server intellij-system-monitor-plugin ai-analysis-service unified-app; do
+            [ -d "$d" ] && jp=$(echo "$jp" | jq -c ". + [\"$d\"]")
+          done
+          for d in noc-dashboard exchange-rate-web; do
+            [ -d "$d" ] && wp=$(echo "$wp" | jq -c ". + [\"$d\"]")
+          done
+          echo "java_projects=$jp" >> "$GITHUB_OUTPUT"
+          echo "web_projects=$wp"  >> "$GITHUB_OUTPUT"
+      - name: Normalize skip flags (수동 실행이 아니면 모두 false)
+        id: flags
+        run: |
+          for f in hygiene java mcp web codeql docs release; do
+            val="false"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              case "$f" in
+                hygiene) val="${{ inputs.skip_hygiene }}";;
+                java)    val="${{ inputs.skip_java }}";;
+                mcp)     val="${{ inputs.skip_mcp }}";;
+                web)     val="${{ inputs.skip_web }}";;
+                codeql)  val="${{ inputs.skip_codeql }}";;
+                docs)    val="${{ inputs.skip_docs }}";;
+                release) val="${{ inputs.skip_release }}";;
+              esac
+            fi
+            echo "skip_$f=$val" >> "$GITHUB_OUTPUT"
+          done
+
+  # 1) 레포 위생 검사
+  repo-hygiene:
+    needs: detect
+    if: needs.detect.outputs.skip_hygiene != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check large files / artifacts / secrets
+        run: |
+          find . -type f -not -path './.git/*' -size +5M -print | sed 's/^/[>5MB] /' || true
+          find . -type d \( -name build -o -name node_modules -o -name .gradle \) -not -path './.git/*' -print | sed 's/^/[artifact] /' || true
+          if grep -rInE '(AKIA[0-9A-Z]{16}|-----BEGIN (RSA|OPENSSH) PRIVATE KEY-----|ghp_[0-9A-Za-z]{36})' --exclude-dir=.git . ; then
+            echo "::error::시크릿 의심 문자열 발견"; exit 1
+          fi
+          echo "hygiene ok"
+
+  # 2) Java(Gradle) 빌드·테스트(동적 매트릭스)
+  java-build:
+    needs: detect
+    if: needs.detect.outputs.skip_java != 'true' && needs.detect.outputs.java_projects != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.detect.outputs.java_projects) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Build & Test (${{ matrix.project }})
+        run: |
+          chmod +x gradlew 2>/dev/null || true
+          if [ -f gradlew ]; then ./gradlew build --no-daemon; else gradle build --no-daemon; fi
+      - name: Upload jar (${{ matrix.project }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-${{ matrix.project }}
+          path: ${{ matrix.project }}/build/libs/*.jar
+          if-no-files-found: ignore
+
+  # 3) MCP 스모크 테스트
+  mcp-smoke-test:
+    needs: [ detect, java-build ]
+    if: |
+      always() &&
+      needs.detect.outputs.skip_mcp != 'true' &&
+      needs.detect.outputs.mcp == 'true' &&
+      needs.java-build.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Run MCP smoke test
+        working-directory: mcp-system-monitor-server
+        run: |
+          chmod +x gradlew; ./gradlew installDist --no-daemon
+          BIN="build/install/mcp-system-monitor-server/bin/mcp-system-monitor-server"
+          echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | "$BIN" | grep -q '"system_status"' \
+            || { echo "::error::tools/list 검증 실패"; exit 1; }
+          echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"system_status","arguments":{}}}' \
+            | "$BIN" | grep -q 'System Status' || { echo "::error::tools/call 검증 실패"; exit 1; }
+          echo "MCP smoke test passed"
+
+  # 4) 웹 검증(동적 매트릭스)
+  web-validate:
+    needs: detect
+    if: needs.detect.outputs.skip_web != 'true' && needs.detect.outputs.web_projects != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.detect.outputs.web_projects) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: HTML lint + JS syntax check
+        run: |
+          if ls *.html >/dev/null 2>&1 || ls **/*.html >/dev/null 2>&1; then
+            npx --yes htmlhint "**/*.html" "*.html" || echo "::warning::htmlhint 경고"
+          fi
+          for f in $(find . -name '*.js' -not -path './node_modules/*'); do
+            node --check "$f" && echo "ok: $f" || { echo "::error::JS 구문 오류: $f"; exit 1; }
+          done
+          if [ -f package.json ]; then npm ci || npm install; npm run build --if-present; fi
+
+  # 5) 보안 분석(CodeQL)
+  codeql:
+    needs: detect
+    if: needs.detect.outputs.skip_codeql != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ java, javascript ]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+      - name: Set up JDK (java)
+        if: matrix.language == 'java'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Manual build (java)
+        if: matrix.language == 'java'
+        run: |
+          for d in mcp-system-monitor-server intellij-system-monitor-plugin ai-analysis-service unified-app; do
+            if [ -d "$d" ] && [ -f "$d/gradlew" ]; then
+              ( cd "$d"; chmod +x gradlew; ./gradlew clean compileJava --no-daemon )
+            fi
+          done
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+
+  # 6) 의존성 검토(PR에서만)
+  dependency-review:
+    needs: detect
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  # 7) 문서 검증
+  docs-check:
+    needs: detect
+    if: needs.detect.outputs.skip_docs != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Markdown link check
+        run: |
+          for f in $(find . -name 'README.md' -not -path './.git/*'); do
+            npx --yes markdown-link-check --quiet "$f" || echo "::warning::링크 경고: $f"
+          done
+
+  # 8) 전체 게이트(스킵된 잡은 통과로 간주)
+  ci-gate:
+    needs: [ repo-hygiene, java-build, web-validate, codeql ]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate (skipped=통과, failure만 차단)
+        run: |
+          echo "hygiene=${{ needs.repo-hygiene.result }}"
+          echo "java=${{ needs.java-build.result }}"
+          echo "web=${{ needs.web-validate.result }}"
+          echo "codeql=${{ needs.codeql.result }}"
+          for r in "${{ needs.repo-hygiene.result }}" "${{ needs.java-build.result }}" "${{ needs.web-validate.result }}" "${{ needs.codeql.result }}"; do
+            if [ "$r" = "failure" ]; then echo "::error::필수 잡 실패"; exit 1; fi
+          done
+          echo "CI gate passed (skipped/success 허용)"
+
+  # 9) 릴리스(v* 태그 + skip_release 아님)
+  release:
+    needs: [ detect, java-build, web-validate, codeql ]
+    if: |
+      always() &&
+      needs.detect.outputs.skip_release != 'true' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.java-build.result != 'failure' &&
+      needs.web-validate.result != 'failure' &&
+      needs.codeql.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+      - name: Package projects
+        run: |
+          mkdir -p dist
+          for d in mcp-system-monitor-server intellij-system-monitor-plugin ai-analysis-service unified-app noc-dashboard exchange-rate-web; do
+            [ -d "$d" ] && zip -rq "dist/$d.zip" "$d" -x '*/build/*' -x '*/.gradle/*' -x '*/node_modules/*'
+          done
+          ls -la dist
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
