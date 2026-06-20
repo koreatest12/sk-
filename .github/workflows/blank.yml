@@ -11,6 +11,7 @@ on:
 permissions:
   contents: write
   security-events: write
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -49,7 +50,29 @@ jobs:
           echo "java_projects=$jp" >> "$GITHUB_OUTPUT"
           echo "web_projects=$wp"  >> "$GITHUB_OUTPUT"
 
-  # 1) Java(Gradle) 프로젝트 빌드·테스트(동적 매트릭스)
+  # 1) 레포 위생 검사 (대용량/금지 파일·줄끝·시크릿 흔적)
+  repo-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check for large files (>5MB)
+        run: |
+          big=$(find . -type f -not -path './.git/*' -size +5M || true)
+          if [ -n "$big" ]; then echo "::warning::5MB 초과 파일:"; echo "$big"; fi
+      - name: Check committed build artifacts
+        run: |
+          bad=$(find . -type d \( -name build -o -name node_modules -o -name .gradle \) -not -path './.git/*' || true)
+          if [ -n "$bad" ]; then echo "::warning::커밋된 빌드 산출물(.gitignore 권장):"; echo "$bad"; fi
+      - name: Basic secret scan
+        run: |
+          if grep -rInE '(AKIA[0-9A-Z]{16}|-----BEGIN (RSA|OPENSSH) PRIVATE KEY-----|ghp_[0-9A-Za-z]{36})' \
+             --exclude-dir=.git . ; then
+            echo "::error::시크릿으로 의심되는 문자열이 발견되었습니다"; exit 1
+          else
+            echo "시크릿 흔적 없음"
+          fi
+
+  # 2) Java(Gradle) 프로젝트 빌드·테스트(동적 매트릭스)
   java-build:
     needs: detect
     if: needs.detect.outputs.java_projects != '[]'
@@ -72,6 +95,14 @@ jobs:
         run: |
           chmod +x gradlew 2>/dev/null || true
           if [ -f gradlew ]; then ./gradlew build --no-daemon; else gradle build --no-daemon; fi
+      - name: Publish test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: tests-${{ matrix.project }}
+          path: ${{ matrix.project }}/build/test-results/test/*.xml
+          reporter: java-junit
+          fail-on-error: false
       - name: Upload jar (${{ matrix.project }})
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,7 +111,7 @@ jobs:
           path: ${{ matrix.project }}/build/libs/*.jar
           if-no-files-found: ignore
 
-  # 2) MCP 프로토콜 스모크 테스트(MCP 서버 변경 시)
+  # 3) MCP 프로토콜 스모크 테스트(MCP 서버 변경 시)
   mcp-smoke-test:
     needs: [ detect, java-build ]
     if: needs.detect.outputs.mcp == 'true'
@@ -103,7 +134,7 @@ jobs:
             | "$BIN" | grep -q 'System Status' || { echo "::error::tools/call 검증 실패"; exit 1; }
           echo "MCP smoke test passed"
 
-  # 3) 웹 프로젝트 검증(동적 매트릭스)
+  # 4) 웹 프로젝트 검증(동적 매트릭스 + lint)
   web-validate:
     needs: detect
     if: needs.detect.outputs.web_projects != '[]'
@@ -120,14 +151,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Validate (${{ matrix.project }})
+      - name: HTML lint
         run: |
           if ls *.html >/dev/null 2>&1 || ls **/*.html >/dev/null 2>&1; then
             npx --yes htmlhint "**/*.html" "*.html" || echo "::warning::htmlhint 경고(차단 아님)"
           fi
+      - name: JS syntax check
+        run: |
+          for f in $(find . -name '*.js' -not -path './node_modules/*'); do
+            node --check "$f" && echo "ok: $f" || { echo "::error::JS 구문 오류: $f"; exit 1; }
+          done
+      - name: Build if package.json exists
+        run: |
           if [ -f package.json ]; then npm ci || npm install; npm run build --if-present; fi
 
-  # 4) 보안 분석(CodeQL: java·javascript, autobuild 미사용)
+  # 5) 보안 분석(CodeQL: java·javascript, autobuild 미사용)
   codeql:
     needs: detect
     runs-on: ubuntu-latest
@@ -159,7 +197,46 @@ jobs:
       - name: Analyze
         uses: github/codeql-action/analyze@v3
 
-  # 5) 릴리스(v* 태그 푸시 시, 프로젝트별 zip 배포)
+  # 6) 의존성 취약점 검토 (PR에서만)
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  # 7) 문서 검증 (마크다운 링크 깨짐 확인)
+  docs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Markdown link check
+        run: |
+          npx --yes markdown-link-check --quiet README.md || echo "::warning::README 링크 경고"
+          for f in $(find . -name 'README.md' -not -path './.git/*'); do
+            npx --yes markdown-link-check --quiet "$f" || echo "::warning::링크 경고: $f"
+          done
+
+  # 8) 전체 게이트 (모든 핵심 잡 성공 여부를 하나로 요약)
+  ci-gate:
+    needs: [ repo-hygiene, java-build, web-validate, codeql ]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate results
+        run: |
+          echo "hygiene=${{ needs.repo-hygiene.result }}"
+          echo "java=${{ needs.java-build.result }}"
+          echo "web=${{ needs.web-validate.result }}"
+          echo "codeql=${{ needs.codeql.result }}"
+          for r in "${{ needs.repo-hygiene.result }}" "${{ needs.codeql.result }}"; do
+            if [ "$r" = "failure" ]; then echo "::error::필수 잡 실패"; exit 1; fi
+          done
+          echo "CI gate passed"
+
+  # 9) 릴리스(v* 태그 푸시 시, 프로젝트별 zip 배포)
   release:
     needs: [ java-build, web-validate, codeql ]
     if: startsWith(github.ref, 'refs/tags/v') && !cancelled()
