@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>환율 정보 (USD/KRW)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="wrap">
+    <h1>환율 변환</h1>
+    <div class="card">
+      <div class="line">
+        <input id="amount" type="number" value="100" min="0" />
+        <select id="from"></select>
+        <span class="arrow">→</span>
+        <select id="to"></select>
+      </div>
+      <div id="result" class="result">조회 중…</div>
+      <div id="meta" class="meta"></div>
+      <button id="convert">변환</button>
+    </div>
+    <p class="src">데이터 출처: Frankfurter API (frankfurter.app)</p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

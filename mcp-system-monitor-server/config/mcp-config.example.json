@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "system-monitor": {
+      "command": "<repo>/build/install/mcp-system-monitor-server/bin/mcp-system-monitor-server"
+    }
+  }
+}

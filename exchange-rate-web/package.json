@@ -1,0 +1,10 @@
+{
+  "name": "exchange-rate-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "lint": "htmlhint **/*.html",
+    "serve": "npx serve ."
+  },
+  "devDependencies": { "htmlhint": "^1.1.4" }
+}

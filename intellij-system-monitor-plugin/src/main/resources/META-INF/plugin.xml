@@ -1,0 +1,26 @@
+<idea-plugin>
+    <id>com.example.system-monitor</id>
+    <name>System Monitor (AI)</name>
+    <vendor email="you@example.com">Kim Byungkwon</vendor>
+    <description><![CDATA[
+        시스템 프로세스/리소스 상태를 조회하고 AI 분석 훅으로 넘길 수 있는 학습용 플러그인.
+        Tools 메뉴 > "System Status (AI)" 액션을 실행하면 현재 시스템 상태를 보여줍니다.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <actions>
+        <action id="com.example.plugin.SystemStatusAction"
+                class="com.example.plugin.SystemStatusAction"
+                text="System Status (AI)"
+                description="현재 시스템 상태를 조회합니다.">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+        <action id="com.example.plugin.AnalyzeAction"
+                class="com.example.plugin.AnalyzeAction"
+                text="System Analyze (AI)"
+                description="시스템 상태를 수집해 AI로 요약합니다.">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

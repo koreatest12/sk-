@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NOC Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>NOC Monitoring Dashboard</h1>
+    <span id="clock" class="clock"></span>
+  </header>
+
+  <section class="summary" id="summary"></section>
+
+  <main class="grid" id="deviceGrid"></main>
+
+  <footer class="foot">
+    <span>자동 새로고침: <b id="refreshRate">5</b>s</span>
+    <span>※ 데모 데이터입니다. 실제 운영 데이터 소스로 교체하세요.</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

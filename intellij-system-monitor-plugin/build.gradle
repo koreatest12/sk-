@@ -1,0 +1,25 @@
+plugins {
+    id 'java'
+    // IntelliJ 플러그인 빌드 (최초 빌드 시 IDE SDK를 내려받습니다 → 네트워크 필요)
+    id 'org.jetbrains.intellij' version '1.17.4'
+}
+
+group = 'com.example'
+version = '0.1.0'
+
+repositories { mavenCentral() }
+
+intellij {
+    version = '2023.2'
+    type = 'IC'            // IntelliJ IDEA Community
+}
+
+patchPluginXml {
+    sinceBuild = '232'
+    untilBuild = '243.*'
+}
+
+// CI 속도/안정성을 위해 searchable options 생성 비활성화
+buildSearchableOptions { enabled = false }
+
+tasks.withType(JavaCompile).configureEach { options.release = 17 }
