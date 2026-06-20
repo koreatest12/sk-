@@ -14,6 +14,15 @@ on:
         description: '이미 있으면 덮어쓰기'
         type: boolean
         default: false
+      mode:
+        description: '결과 반영 방식'
+        type: choice
+        options: [ commit, pull_request ]
+        default: commit
+      target_branch:
+        description: 'commit 모드에서 푸시할 브랜치'
+        required: false
+        default: 'scaffold/services'
 
 permissions:
   contents: write
@@ -94,9 +103,29 @@ jobs:
           echo "=== 생성 결과 ==="
           find mcp-system-monitor-server intellij-system-monitor-plugin noc-dashboard exchange-rate-web -type f 2>/dev/null | sort || true
 
-      - name: Create Pull Request
+      # 방식 A) 직접 커밋·푸시 (기본, 추가 권한 불필요)
+      - name: Commit & push (mode=commit)
+        if: ${{ github.event.inputs.mode != 'pull_request' }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "변경 사항이 없습니다."; exit 0
+          fi
+          BR="${{ github.event.inputs.target_branch }}"
+          git checkout -B "$BR"
+          git add -A
+          git commit -m "chore: scaffold service files (${{ github.event.inputs.services }})"
+          git push --force-with-lease origin "$BR"
+          echo "✅ '$BR' 브랜치에 푸시 완료. 필요하면 수동으로 PR을 여세요."
+
+      # 방식 B) PR 생성 (저장소 설정에서 'Allow GitHub Actions to create and approve pull requests' 필요)
+      - name: Create Pull Request (mode=pull_request)
+        if: ${{ github.event.inputs.mode == 'pull_request' }}
         uses: peter-evans/create-pull-request@v6
         with:
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
           commit-message: "chore: scaffold service files (${{ github.event.inputs.services }})"
           branch: scaffold/services
           delete-branch: true
